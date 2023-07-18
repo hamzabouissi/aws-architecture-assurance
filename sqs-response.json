@@ -1,0 +1,26 @@
+ {
+    "version": "0",
+    "id": "df97867e-89cd-ed1d-acfd-b796c06769ae",
+    "detail-type": "Object Deleted",
+    "source": "aws.s3",
+    "account": "021338898563",
+    "time": "2023-05-09T18: 47: 46Z",
+    "region": "eu-west-3",
+    "resources": [
+        "arn:aws:s3: : :openvidu-recording-587ed"
+    ],
+    "detail": {
+        "version": "0",
+        "bucket": {
+            "name": "openvidu-recording-587ed"
+        },
+        "object": {
+            "key": "sheela-peru-gray-vulture.mp4",
+            "sequencer": "00645A95522F1DF46A"
+        },
+        "request-id": "DF5YFEFPYR3WNDAG",
+        "requester": "021338898563",
+        "source-ip-address": "102.171.186.85",
+        "reason": "PutObject"
+    }
+}

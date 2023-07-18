@@ -1,0 +1,501 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: OpenVidu Platform
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: test
+    Description: The name of the environment to add this service to
+  WhichCert:
+    Description: >
+      [selfsigned] Self signed certificate. Not recommended for production use.
+      [owncert] Valid certificate purchased in a Internet services company.
+      [letsencrypt] Generate a new certificate using Let's Encrypt.
+    Type: String
+    AllowedValues:
+      - selfsigned
+      - owncert
+      - letsencrypt
+    Default: selfsigned
+  # OpenVidu configuration
+
+  OpenViduSecret:
+    Description: "Secret to connect to this OpenVidu Platform. Cannot be empty and must contain only alphanumeric characters [a-zA-Z0-9], hypens ('-') and underscores ('_')"
+    Type: String
+    AllowedPattern: ^[a-zA-Z0-9_-]+$
+    NoEcho: true
+    ConstraintDescription: "Cannot be empty and must contain only alphanumeric characters [a-zA-Z0-9], hypens ('-') and underscores ('_')"
+
+  # EC2 Instance configuration
+
+  InstanceType:
+    Description: "Specifies the EC2 instance type for your OpenVidu instance"
+    Type: String
+    Default: c5.xlarge
+    AllowedValues:
+      - t2.large
+      - t2.xlarge
+      - t2.2xlarge
+      - t3.large
+      - t3.xlarge
+      - t3.2xlarge
+      - m4.large
+      - m4.xlarge
+      - m4.2xlarge
+      - m4.4xlarge
+      - m4.10xlarge
+      - m4.16xlarge
+      - m5.large
+      - m5.xlarge
+      - m5.2xlarge
+      - m5.4xlarge
+      - m5.8xlarge
+      - m5.12xlarge
+      - m5.16xlarge
+      - m5.24xlarge
+      - c4.large
+      - c4.xlarge
+      - c4.2xlarge
+      - c4.4xlarge
+      - c4.8xlarge
+      - c5.large
+      - c5.xlarge
+      - c5.2xlarge
+      - c5.4xlarge
+      - c5.9xlarge
+      - c5.12xlarge
+      - c5.18xlarge
+      - c5.24xlarge
+    ConstraintDescription: "Must be a valid EC2 instance type"
+
+#start_mappings
+Mappings:
+  OVAMIMAP:
+    eu-west-1:
+      AMI: ami-04ee58b830df6b3aa
+#end_mappings
+
+Resources:
+  OpenviduServer:
+    Type: "AWS::EC2::Instance"
+    Metadata:
+      Comment: "Install and configure OpenVidu Server and Demos"
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/usr/local/bin/check_app_ready.sh":
+              content: |
+                #!/bin/bash
+                while true; do
+                  HTTP_STATUS=$(curl -Ik http://localhost:5443 | head -n1 | awk '{print $2}')
+                  if [ $HTTP_STATUS == 200 ]; then
+                    break
+                  fi
+                  sleep 5
+                done
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            "/usr/local/bin/feedGroupVars.sh":
+              content: !Sub |
+                #!/bin/bash -x
+                WORKINGDIR=/opt/openvidu
+
+                # Replace secret
+                sed -i "s/OPENVIDU_SECRET=/OPENVIDU_SECRET=${OpenViduSecret}/" $WORKINGDIR/.env
+
+                 
+                mkdir -p /usr/share/openvidu
+                PublicHostname=$(curl http://169.254.169.254/latest/meta-data/public-hostname)
+                sed -i "s/DOMAIN_OR_PUBLIC_IP=/DOMAIN_OR_PUBLIC_IP=$PublicHostname/" $WORKINGDIR/.env
+                echo $PublicHostname > /usr/share/openvidu/old-host-name
+
+                # Replace certificated type
+                sed -i "s/CERTIFICATE_TYPE=selfsigned/CERTIFICATE_TYPE=${WhichCert}/" $WORKINGDIR/.env
+
+                # Adding recording module
+                sed -i "s/OPENVIDU_RECORDING=false/OPENVIDU_RECORDING=true/" $WORKINGDIR/.env
+
+              
+              mode: "000755"
+              owner: "root"
+              group: "root"
+              authentication: "root:root"
+            "/usr/local/bin/restartCE.sh":
+              content: !Sub |
+                #!/bin/bash -x
+                WORKINGDIR=/opt/openvidu
+                
+                # Get new amazon URL
+                OldPublicHostname=$(cat /usr/share/openvidu/old-host-name)
+                PublicHostname=$(curl http://169.254.169.254/latest/meta-data/public-hostname)
+                sed -i "s/$OldPublicHostname/$PublicHostname/" $WORKINGDIR/.env
+                echo $PublicHostname > /usr/share/openvidu/old-host-name
+
+                # Restart all services
+                pushd /opt/openvidu
+                docker-compose up -d kms
+                until docker-compose ps | grep kms | grep healthy; do
+                    echo "Waiting kms..."
+                done
+                docker-compose up -d
+                popd
+              mode: "000755"
+              owner: "root"
+              group: "root"
+            "/usr/local/bin/copy_file_to_s3.py":
+              content: !Sub |
+                import os
+                import json
+                import boto3
+                import botocore
+
+                s3 = boto3.client('s3')
+
+
+                recording_bucket = "${RecordingBucket}"
+                path = "/opt/openvidu/recordings"
+
+                folders = os.listdir(path)
+
+                for folder in folders:
+                  files = os.listdir(f"{path}/{folder}")
+                  state_file  = list([ f for f in files if f.startswith(".recording")])
+                  mp4_file = list([ f for f in files if f.endswith(".mp4")])
+                
+                  if state_file:
+                    d = f"{path}/{folder}/{state_file[0]}"
+                    with open(d, "r") as f:
+                      d = f.read()
+                      data = json.loads(d)
+                      if data['status'] == 'ready':
+                        try:
+                            bucket_exist = s3.get_object(
+                                Bucket=recording_bucket,
+                                Key=mp4_file[0],
+                            )
+
+                        except botocore.exceptions.ClientError as error :
+                            if error.response['Error']['Code'] == 'NoSuchKey':
+                                
+                                s3.upload_file(f"{path}/{folder}/{mp4_file[0]}",recording_bucket, mp4_file[0])
+                                print(f"uploading {mp4_file} success")
+                            else:
+                                print(f"error {error}")
+                      else:
+                          print(f"{state_file[0]} still streaming")
+              mode: "000755"
+              owner: "root"
+              group: "root"
+        
+    Properties:
+      ImageId: !GetAtt CloudformationLambdaInvoke.ImageId
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref OpenServerIamProfile
+      SecurityGroupIds:
+        - !GetAtt WebServerSecurityGroup.GroupId
+      SubnetId:
+        Fn::ImportValue: !Sub ${EnvironmentName}:PublicSubnetOne
+      KeyName: !Ref SSHkey
+      Tags:
+        - Key: Name
+          Value: !Ref "AWS::StackName"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -x
+          set -eu -o pipefail
+
+          cfn-init --region ${AWS::Region} --stack ${AWS::StackId} --resource OpenviduServer
+
+          export HOME="/root"
+
+          # Replace .env variables
+          /usr/local/bin/feedGroupVars.sh || { echo "[OpenVidu] Parameters incorrect/insufficient"; exit 1; }
+
+          # Launch on reboot
+          echo "@reboot /usr/local/bin/restartCE.sh" | crontab
+
+
+          # Start openvidu application
+          pushd /opt/openvidu
+          docker-compose up -d kms
+          until docker-compose ps | grep kms | grep healthy; do
+              echo "Waiting kms..."
+          done
+          docker-compose up -d
+          popd
+
+          # Wait for the app
+          /usr/local/bin/check_app_ready.sh
+
+          # install aws cli for sync recording
+          sudo apt update
+          sudo apt install -y awscli
+          sudo pip install boto3
+
+          # add crontab for copying recording to S3 Bucket to check every 1 minute
+
+          echo "* * * * * python3 /usr/local/bin/copy_file_to_s3.py" | crontab
+
+          # sending the finish call
+          /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WaitCondition --region ${AWS::Region}
+
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeType: gp2
+            DeleteOnTermination: true
+            VolumeSize: 200
+
+  RecordingBucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: Private 
+      BucketName: openvidu-recording-597edw
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+  
+  OpenviduServerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: openvidu-s3
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+  
+  OpenviduServerS3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: OpenviduServerS3Policy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource:
+              - !Sub arn:aws:s3:::${RecordingBucket}/*
+              - !Sub arn:aws:s3:::${RecordingBucket}
+      Roles:
+        -
+          !Ref OpenviduServerRole
+  
+  OpenServerIamProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref OpenviduServerRole
+
+  SSHkey:
+    Type: "AWS::EC2::KeyPair"
+    Properties:
+      KeyName: Ec2Key
+
+  WebServerSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupName: SSH, Proxy and OpenVidu WebRTC Ports
+      GroupDescription: SSH, Proxy and OpenVidu WebRTC Ports
+      VpcId:
+        Fn::ImportValue: !Sub ${EnvironmentName}:VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIpv6: ::/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIpv6: ::/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIpv6: ::/0
+        - IpProtocol: tcp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIpv6: ::/0
+        - IpProtocol: udp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 3478
+          ToPort: 3478
+          CidrIpv6: ::/0
+        - IpProtocol: udp
+          FromPort: 40000
+          ToPort: 57000
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: udp
+          FromPort: 40000
+          ToPort: 57000
+          CidrIpv6: ::/0
+        - IpProtocol: tcp
+          FromPort: 40000
+          ToPort: 57000
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 40000
+          ToPort: 57000
+          CidrIpv6: ::/0
+
+  ##########
+  # Lambda to Copy original AMI to the deployment region
+  ##########
+  CloudformationLambdaRole:
+    Type: "AWS::IAM::Role"
+    DeletionPolicy: Delete
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      Policies:
+        - PolicyName: !Join ["", [!Ref AWS::StackName, "-cf-lambda-policy"]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:DescribeImages"
+                  - "ec2:CopyImage"
+                Resource: "*"
+      RoleName: !Join ["", [!Ref AWS::StackName, "-cf-lambda-role"]]
+
+  CloudformationLambda:
+    Type: AWS::Lambda::Function
+    DeletionPolicy: Delete
+    Properties:
+      FunctionName: !Join ["", [!Ref AWS::StackName, "-cf-lambda"]]
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          from botocore.config import Config
+
+          def handler(event, context):
+              try:
+                  if (event['RequestType'] == 'Create'):
+                      copy_ami(event, context)
+                      return
+                  else:
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception:
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+          def copy_ami(event, context):
+              new_images=[]
+              cfn_output = {}
+              source_image_id = event['ResourceProperties']['AmiSourceId']
+              source_region = event['ResourceProperties']['AmiSourceRegion']
+              deployment_region = event['ResourceProperties']['DeploymentRegion']
+
+              # Clients init
+              ec2_client = boto3.client('ec2', config = Config(region_name=deployment_region))
+              ec2_client_ov = boto3.client('ec2', config = Config(region_name=source_region))
+              img_exists_waiter= ec2_client.get_waiter('image_exists')
+              img_avail_waiter = ec2_client.get_waiter('image_available')
+
+              # Get original ami name
+              public_ami_filter = [{ 'Name': 'image-id', 'Values': [ source_image_id ] }]
+
+              response = ec2_client_ov.describe_images(Filters=public_ami_filter)
+              new_ami_name= "[ OpenVidu CE AMI Copy ] - " + response['Images'][0]['Name']
+
+              own_ami_filter = [{ 'Name': 'name', 'Values': [new_ami_name] }]
+              response = ec2_client.describe_images(Filters=own_ami_filter)
+              if (len(response['Images']) == 1):
+                  # If AMI exists, don't copy
+                  new_images.append(response['Images'][0]['ImageId'])
+                  cfn_output['ImageId'] = response['Images'][0]['ImageId']
+              else:
+                  # If AMI does not exist, copy
+                  response = ec2_client.copy_image(
+                      SourceImageId=source_image_id,
+                      SourceRegion=source_region,
+                      Name=new_ami_name
+                  )
+                  new_images.append(response['ImageId'])
+                  cfn_output['ImageId'] = response['ImageId']
+
+              # Wait images to be available
+              waiter_config = {'Delay': 15, 'MaxAttempts': 59 }
+              
+              # Wait image to exist
+              response = img_exists_waiter.wait(ImageIds=new_images, WaiterConfig=waiter_config
+              )
+              # Wait image to be available
+              response = img_avail_waiter.wait(ImageIds=new_images, WaiterConfig=waiter_config)
+
+              # Return AMI
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, cfn_output)
+
+      Handler: index.handler
+      Role: !GetAtt CloudformationLambdaRole.Arn
+      Runtime: python3.7
+      Timeout: 900
+
+  CloudformationLambdaInvoke:
+    Type: AWS::CloudFormation::CustomResource
+    DeletionPolicy: Delete
+    Version: "1.0"
+    Properties:
+      ServiceToken: !GetAtt CloudformationLambda.Arn
+      AmiSourceRegion: "eu-west-1"
+      AmiSourceId: !FindInMap [OVAMIMAP, "eu-west-1", AMI]
+      DeploymentRegion: !Ref AWS::Region
+
+  WaitCondition:
+    Type: "AWS::CloudFormation::WaitCondition"
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT30M
+        Count: "1"
+
+Outputs:
+  OpenViduServerURL:
+    Description: Use this URL to connect OpenVidu Server
+    Value: !Join
+      - ""
+      - - "https://"
+        - !GetAtt OpenviduServer.PublicDnsName
+
+  RecordingBucketName:
+    Description: S3 Recording Bucket
+    Value: !Ref 'RecordingBucket'
+    Export:
+      Name: !Sub ${EnvironmentName}:RecordingBucketName

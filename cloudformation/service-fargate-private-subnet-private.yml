@@ -1,0 +1,336 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: test
+    Description: The name of the environment to add this service to
+  ServiceName:
+    Type: String
+    Default: sqs-pull-ffmpeg
+    Description: A name for the service
+  
+  ImageUrl:
+    Type: String
+    Description: The url of a docker image that contains the application process that
+                 will handle the traffic for this service
+
+
+Resources:
+
+  DestinationBucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: Private 
+      BucketName: openvidu-recording-destination-1e57
+
+  MyRepository: 
+    Type: AWS::ECR::Repository
+    Properties: 
+      RepositoryName: !Sub ${ServiceName}-repo
+
+
+  # Service:
+  #   Type: AWS::ECS::Service
+  #   Properties:
+  #     ServiceName: !Ref ServiceName
+  #     Cluster: !Ref ECSCluster
+  #     LaunchType: FARGATE
+  #     DesiredCount: 1
+  #     NetworkConfiguration:
+  #       AwsvpcConfiguration:
+  #         SecurityGroups: 
+  #           - !Ref ContainerSecurityGroup
+  #         Subnets:
+  #           - Fn::ImportValue: !Sub ${EnvironmentName}:PrivateSubnetOne
+  #           - Fn::ImportValue: !Sub ${EnvironmentName}:PrivateSubnetTwo
+  #     TaskDefinition: !Ref 'TaskDefinition'
+
+
+  # ECSCluster:
+  #   Type: AWS::ECS::Cluster
+  #   Properties:
+  #     ClusterSettings:
+  #       - Name: containerInsights
+  #         Value: enabled
+  
+  # ContainerSecurityGroup:
+  #   Type: AWS::EC2::SecurityGroup
+  #   Properties:
+  #     GroupDescription: Access to the Fargate containers
+  #     VpcId: 
+  #       Fn::ImportValue: !Sub ${EnvironmentName}:VpcId
+  
+  # TaskDefinition:
+  #   Type: AWS::ECS::TaskDefinition
+  #   Properties:
+  #     Family: !Ref ServiceName
+  #     Cpu: 512
+  #     Memory: 2048
+  #     NetworkMode: awsvpc
+  #     RequiresCompatibilities:
+  #       - FARGATE
+  #     ExecutionRoleArn: !Ref ECSTaskExecutionRole
+  #     TaskRoleArn: !Ref ECSRole
+  #     ContainerDefinitions:
+  #       - Name: !Ref ServiceName
+  #         Cpu: 512
+  #         Memory: 2048
+  #         Image: !Ref 'ImageUrl'
+  #         Environment:
+  #           - Name: QueueName
+  #             Value: 
+  #               Fn::ImportValue: !Sub ${EnvironmentName}:SQSqueueName
+  #           - Name: DestinationBucket
+  #             Value: !Ref DestinationBucket
+                
+  #         LogConfiguration:
+  #           LogDriver: 'awslogs'
+  #           Options:
+  #             awslogs-group: !Sub ${EnvironmentName}-service-${ServiceName}
+  #             awslogs-region: !Ref 'AWS::Region'
+  #             awslogs-stream-prefix: !Ref ServiceName
+  
+  # ECSRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Statement:
+  #       - Effect: Allow
+  #         Principal:
+  #           Service: [ecs-tasks.amazonaws.com]
+  #         Action: ['sts:AssumeRole']
+  #     Path: /
+  #     # Allow receiving messages from SQS
+  #     # Allow downloading object from S3 and upload
+  #     ManagedPolicyArns:
+  #       - arn:aws:iam::aws:policy/AmazonS3FullAccess
+  #     Policies:
+  #       - PolicyName: AmazonECSRolePolicy
+  #         PolicyDocument:
+  #           Statement:
+  #           - Effect: Allow
+  #             Action:
+  #               - 'sqs:GetQueueAttributes'
+  #               - 'sqs:GetQueueUrl'
+  #               - 'sqs:ListDeadLetterSourceQueues'
+  #               - 'sqs:ListQueues'
+  #               - 'sqs:ReceiveMessage'
+  #               - 'sqs:DeleteMessage'
+
+  #             Resource: 
+  #               Fn::ImportValue: !Sub ${EnvironmentName}:SQSqueueARN
+  
+
+  # ECSTaskExecutionRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Statement:
+  #       - Effect: Allow
+  #         Principal:
+  #           Service: [ecs-tasks.amazonaws.com]
+  #         Action: ['sts:AssumeRole']
+  #     Path: /
+      
+  #     Policies:
+  #       - PolicyName: AmazonECSTaskExecutionRolePolicy
+  #         PolicyDocument:
+  #           Statement:
+  #           - Effect: Allow
+  #             Action:
+  #               # Allow the ECS Tasks to download images from ECR
+  #               - 'ecr:GetAuthorizationToken'
+  #               - 'ecr:BatchCheckLayerAvailability'
+  #               - 'ecr:GetDownloadUrlForLayer'
+  #               - 'ecr:BatchGetImage'
+  #             Resource: "*"
+            
+  #           - Effect: Allow
+  #             Action:
+  #               # Allow the ECS tasks to upload logs to CloudWatch
+  #               - 'logs:CreateLogStream'
+  #               - 'logs:PutLogEvents'
+  #             Resource: !GetAtt LogGroup.Arn
+  
+  # LogGroup:
+  #   Type: AWS::Logs::LogGroup
+  #   Properties:
+  #     LogGroupName: !Sub ${EnvironmentName}-service-${ServiceName}
+
+  # ScalableTarget:
+  #   Type: AWS::ApplicationAutoScaling::ScalableTarget
+  #   DependsOn: Service
+  #   Properties:
+  #     ServiceNamespace: 'ecs'
+  #     ScalableDimension: 'ecs:service:DesiredCount'
+  #     ResourceId:
+  #       Fn::Join:
+  #         - '/'
+  #         - - service
+  #           - !Ref ECSCluster
+  #           - !Ref ServiceName
+  #     MinCapacity: 1
+  #     MaxCapacity: 10
+  #     RoleARN: !GetAtt  AutoscalingRole.Arn
+  
+  # AutoscalingRole:
+  #   Type: AWS::IAM::Role
+  #   Properties:
+  #     AssumeRolePolicyDocument:
+  #       Statement:
+  #       - Effect: Allow
+  #         Principal:
+  #           Service: [application-autoscaling.amazonaws.com]
+  #         Action: ['sts:AssumeRole']
+  #     Path: /
+  #     Policies:
+  #     - PolicyName: service-autoscaling
+  #       PolicyDocument:
+  #         Statement:
+  #         - Effect: Allow
+  #           Action:
+  #             - 'application-autoscaling:*'
+  #             - 'cloudwatch:DescribeAlarms'
+  #             - 'cloudwatch:PutMetricAlarm'
+  #             - 'ecs:DescribeServices'
+  #             - 'ecs:UpdateService'
+  #           Resource: '*'
+  
+
+  # ScaleDownPolicy:
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   Properties:
+  #     PolicyName:
+  #       Fn::Join:
+  #         - '/'
+  #         - - scale
+  #           - !Ref 'EnvironmentName'
+  #           - !Ref ServiceName
+  #           - down
+  #     PolicyType: StepScaling
+  #     ScalingTargetId: !GetAtt  ScalableTarget.Id
+      
+  #     ScalableDimension: 'ecs:service:DesiredCount'
+  #     ServiceNamespace: 'ecs'
+  #     StepScalingPolicyConfiguration:
+  #       AdjustmentType: 'ChangeInCapacity'
+  #       StepAdjustments:
+  #         - MetricIntervalUpperBound: 0
+  #           ScalingAdjustment: -1
+  #       MetricAggregationType: 'Maximum'
+  #       Cooldown: 180
+   
+  # ScaleUpPolicy:
+  #   Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  #   DependsOn: ScalableTarget
+  #   Properties:
+  #     PolicyName:
+  #       Fn::Join:
+  #         - '/'
+  #         - - scale
+  #           - !Ref 'EnvironmentName'
+  #           - !Ref ServiceName
+  #           - up
+  #     PolicyType: StepScaling
+  #     ScalingTargetId: !Ref ScalableTarget
+      
+  #     ScalableDimension: 'ecs:service:DesiredCount'
+  #     ServiceNamespace: 'ecs'
+  #     StepScalingPolicyConfiguration:
+  #       AdjustmentType: 'ChangeInCapacity'
+  #       StepAdjustments:
+  #         - MetricIntervalLowerBound: 10
+  #           MetricIntervalUpperBound: 25
+  #           ScalingAdjustment: 1
+  #         - MetricIntervalLowerBound: 25
+  #           MetricIntervalUpperBound: 35
+  #           ScalingAdjustment: 2
+  #         - MetricIntervalLowerBound: 35
+  #           ScalingAdjustment: 4
+  #       MetricAggregationType: 'Maximum'
+  #       Cooldown: 180
+  
+  # ScaleDownBacklogPerTaskAlarm:
+  #   Type: "AWS::CloudWatch::Alarm"
+  #   Properties:
+  #     AlarmDescription: "Trigger scaling based on SQS queue"
+  #     Metrics:
+  #       - Id: summary
+  #         Label: Backlog Per Task
+  #         Expression: sqs_messages/running_ecs
+  #         ReturnData: true
+        
+  #       - Id: sqs_messages
+  #         MetricStat:
+  #           Metric:
+  #             Namespace: AWS/SQS
+  #             MetricName: ApproximateNumberOfMessagesVisible
+  #             Dimensions:
+  #             - Name: QueueName
+  #               Value: 
+  #                 Fn::ImportValue: !Sub ${EnvironmentName}:SQSqueueName
+  #           Stat: Maximum
+  #           Period: 60
+  #         ReturnData: false
+        
+  #       - Id: running_ecs
+  #         MetricStat:
+  #           Metric:
+  #             Namespace: ECS/ContainerInsights
+  #             MetricName: RunningTaskCount
+  #             Dimensions:
+  #               - Name: ServiceName
+  #                 Value: !GetAtt Service.Name
+  #               - Name: ClusterName
+  #                 Value: !Ref ECSCluster
+                    
+  #           Stat: Maximum
+  #           Period: 60
+  #         ReturnData: false
+      
+  #     ComparisonOperator: "LessThanOrEqualToThreshold"
+  #     EvaluationPeriods: 5
+  #     Threshold: 5
+  #     AlarmActions:
+  #       - !Ref "ScaleDownPolicy"
+  
+  # ScaleUpBacklogPerTaskAlarm:
+  #   Type: "AWS::CloudWatch::Alarm"
+  #   Properties:
+  #     AlarmDescription: "Trigger scaling based on SQS queue"
+  #     Metrics:
+  #       - Id: summary
+  #         Label: Backlog Per Task
+  #         Expression: sqs_messages/running_ecs
+  #         ReturnData: true
+  #       - Id: sqs_messages
+  #         MetricStat:
+  #           Metric:
+  #             Namespace: AWS/SQS
+  #             MetricName: ApproximateNumberOfMessagesVisible
+  #             Dimensions:
+  #             - Name: QueueName
+  #               Value: 
+  #                 Fn::ImportValue: !Sub ${EnvironmentName}:SQSqueueName
+  #           Stat: Maximum
+  #           Period: 60
+  #         ReturnData: false
+  #       - Id: running_ecs
+  #         MetricStat:
+  #           Metric:
+  #             Namespace: ECS/ContainerInsights
+  #             MetricName: RunningTaskCount
+  #             Dimensions:
+  #               - Name: ServiceName
+  #                 Value: !GetAtt Service.Name
+  #               - Name: ClusterName
+  #                 Value: !Ref ECSCluster
+                    
+  #           Stat: Maximum
+  #           Period: 60
+  #         ReturnData: false
+  #     ComparisonOperator: "GreaterThanThreshold"
+  #     EvaluationPeriods: 5
+  #     Threshold: 5
+  #     AlarmActions:
+  #       - !Ref "ScaleUpPolicy"
